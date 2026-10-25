@@ -186,6 +186,13 @@ class SatClimate(SatEntity, ClimateEntity, RestoreEntity):
         if self._simulation:
             _LOGGER.warning("Simulation mode!")
 
+    async def async_will_remove_from_hass(self) -> None:
+        if self._control_heating_loop_unsub is not None:
+            self._control_heating_loop_unsub()
+            self._control_heating_loop_unsub = None
+
+        await super().async_will_remove_from_hass()
+    
     def async_track_coordinator_data(self):
         """Track changes in the coordinator's boiler temperature and trigger the heating loop."""
         if self._coordinator.boiler_temperature is not None and self._last_boiler_temperature == self._coordinator.boiler_temperature:
