@@ -148,3 +148,9 @@ class SatEmsMqttCoordinator(SatMqttCoordinator):
             self.async_set_updated_data(json.loads(value))
         except json.JSONDecodeError as error:
             _LOGGER.error("Failed to decode JSON payload: %s. Error: %s", value, error)
+
+    async def async_will_remove_from_hass(self) -> None:
+        await self.async_set_control_setpoint(0)
+        await super().async_will_remove_from_hass()
+
+
