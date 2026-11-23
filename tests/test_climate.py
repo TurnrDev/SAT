@@ -1,5 +1,6 @@
 """Tests focused on SAT climate setpoint and heating curve behavior."""
 
+import logging
 from datetime import timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -16,6 +17,7 @@ from custom_components.sat.const import (
     HEATING_CONTROL_SCHEDULE_TIMEOUT_SECONDS,
     CONF_HEATING_CURVE_COEFFICIENT,
     CONF_HEATING_MODE,
+    CONF_OUTSIDE_SENSOR_ENTITY_ID,
     CONF_SOLAR_GAIN_COMPENSATION,
     CONF_SOLAR_GAIN_FREEZE_INTEGRAL,
     CONF_SOLAR_GAIN_MIN_ELEVATION,
@@ -222,6 +224,96 @@ async def test_control_loop_commands_heater_off_when_hvac_off(monkeypatch, hass,
     assert demand.hvac_mode == HVACMode.OFF
     assert demand.requested_setpoint == MINIMUM_SETPOINT
     assert demand.heater_state == HeaterState.OFF
+
+
+@pytest.mark.parametrize("state", ["unknown", "unavailable"])
+async def test_control_loop_commands_heater_off_when_outside_temperature_unavailable(state, monkeypatch, hass, demand_control):
+    hass.states.async_set("sensor.test_outside_sensor", state)
+    demand_control._hvac_mode = HVACMode.HEAT
+
+    update_mock = AsyncMock()
+    monkeypatch.setattr(demand_control._heating_control, "update", update_mock)
+
+    await demand_control.async_control_heating_loop()
+
+    demand = update_mock.call_args.args[0]
+    assert demand.hvac_mode == HVACMode.HEAT
+    assert demand.requested_setpoint == MINIMUM_SETPOINT
+    assert demand.heater_state == HeaterState.OFF
+    assert demand_control.hvac_mode == HVACMode.HEAT
+
+
+async def test_control_loop_commands_heater_off_repeatedly_while_outside_temperature_is_stale(monkeypatch, hass, demand_control, caplog):
+    _update_climate_config(demand_control, options={CONF_SENSOR_MAX_VALUE_AGE: "00:01:00"})
+    demand_control._hvac_mode = HVACMode.HEAT
+
+    now = dt_util.utcnow()
+    monkeypatch.setattr(dt_util, "utcnow", lambda: now)
+    hass.states.async_set("sensor.test_outside_sensor", "5")
+    monkeypatch.setattr(dt_util, "utcnow", lambda: now + timedelta(seconds=120))
+
+    update_mock = AsyncMock()
+    monkeypatch.setattr(demand_control._heating_control, "update", update_mock)
+
+    with caplog.at_level(logging.INFO, logger="custom_components.sat.demand_control"):
+        await demand_control.async_control_heating_loop()
+        await demand_control.async_control_heating_loop()
+
+    assert update_mock.call_count == 2
+    assert all(call.args[0].heater_state == HeaterState.OFF for call in update_mock.call_args_list)
+    assert sum("Outside temperature is unavailable" in message for message in caplog.messages) == 1
+
+
+async def test_control_loop_uses_valid_fallback_outside_sensor(monkeypatch, hass, demand_control):
+    _update_climate_config(demand_control, data={CONF_OUTSIDE_SENSOR_ENTITY_ID: ["sensor.primary_outside", "sensor.fallback_outside"]})
+    hass.states.async_set("sensor.primary_outside", "unavailable")
+    hass.states.async_set("sensor.fallback_outside", "5")
+    demand_control._hvac_mode = HVACMode.HEAT
+    demand_control.heating_curve._value = 35.0
+
+    update_mock = AsyncMock()
+    monkeypatch.setattr(demand_control._heating_control, "update", update_mock)
+
+    await demand_control.async_control_heating_loop()
+
+    demand = update_mock.call_args.args[0]
+    assert demand.outside_temperature == 5.0
+    assert demand.requested_setpoint == demand_control.requested_setpoint
+
+
+async def test_control_loop_fails_safe_when_all_outside_sensors_are_unavailable(monkeypatch, hass, demand_control):
+    _update_climate_config(demand_control, data={CONF_OUTSIDE_SENSOR_ENTITY_ID: ["sensor.primary_outside", "sensor.fallback_outside"]})
+    hass.states.async_set("sensor.primary_outside", "unknown")
+    hass.states.async_set("sensor.fallback_outside", "unavailable")
+    demand_control._hvac_mode = HVACMode.HEAT
+
+    update_mock = AsyncMock()
+    monkeypatch.setattr(demand_control._heating_control, "update", update_mock)
+
+    await demand_control.async_control_heating_loop()
+
+    assert update_mock.call_args.args[0].heater_state == HeaterState.OFF
+
+
+async def test_control_loop_resumes_when_outside_temperature_recovers(monkeypatch, hass, demand_control, caplog):
+    hass.states.async_set("sensor.test_outside_sensor", "unavailable")
+    demand_control._hvac_mode = HVACMode.HEAT
+    demand_control.heating_curve._value = 35.0
+
+    update_mock = AsyncMock()
+    monkeypatch.setattr(demand_control._heating_control, "update", update_mock)
+
+    with caplog.at_level(logging.INFO, logger="custom_components.sat.demand_control"):
+        await demand_control.async_control_heating_loop()
+        hass.states.async_set("sensor.test_outside_sensor", "5")
+        await demand_control.async_control_heating_loop()
+
+    first_demand, recovered_demand = (call.args[0] for call in update_mock.call_args_list)
+    assert first_demand.heater_state == HeaterState.OFF
+    assert recovered_demand.outside_temperature == 5.0
+    assert recovered_demand.requested_setpoint == demand_control.requested_setpoint
+    assert demand_control.hvac_mode == HVACMode.HEAT
+    assert any("Outside temperature recovered" in message for message in caplog.messages)
 
 
 def test_register_event_listeners_is_idempotent(monkeypatch, demand_control):

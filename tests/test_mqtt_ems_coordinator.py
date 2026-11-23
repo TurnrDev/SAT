@@ -4,6 +4,7 @@ import json
 from unittest.mock import AsyncMock
 
 import pytest
+from homeassistant.components.climate import HVACMode
 
 from custom_components.sat.const import CONF_DEVICE, CONF_MODE, CONF_MQTT_TOPIC, MINIMUM_SETPOINT, OPTIONS_DEFAULTS
 from custom_components.sat.coordinator.mqtt.ems import (
@@ -22,6 +23,8 @@ from custom_components.sat.coordinator.mqtt.ems import (
     SatEmsMqttCoordinator,
 )
 from custom_components.sat.entry_data import SatConfig, SatMode
+from custom_components.sat.heating_control import HeatingDemand, SatHeatingControl
+from custom_components.sat.helpers import timestamp
 from custom_components.sat.types import HeaterState
 from tests.const import DEFAULT_USER_DATA
 
@@ -160,6 +163,26 @@ async def test_set_control_setpoint_minimum_sends_zero(coordinator, monkeypatch)
 
     payload = json.loads(calls[0][0])
     assert payload["value"] == 0
+
+
+@pytest.mark.asyncio
+async def test_heating_control_off_demand_sends_zero_selflowtemp(hass, coordinator, monkeypatch):
+    calls = []
+    monkeypatch.setattr(coordinator, "_publish_command", AsyncMock(side_effect=lambda *a, **kw: calls.append(json.loads(a[0]))))
+    monkeypatch.setattr(coordinator, "async_control_heating_loop", AsyncMock())
+    heating_control = SatHeatingControl(hass, coordinator, coordinator._config)
+
+    await heating_control.update(
+        HeatingDemand(
+            timestamp=timestamp(),
+            valves_open=True,
+            hvac_mode=HVACMode.HEAT,
+            requested_setpoint=MINIMUM_SETPOINT,
+            outside_temperature=None,
+        )
+    )
+
+    assert {"cmd": "selflowtemp", "value": 0} in calls
 
 
 @pytest.mark.asyncio

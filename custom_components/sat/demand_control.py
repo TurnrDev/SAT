@@ -75,6 +75,7 @@ class SatDemandControl:
         self._cancel_wind_backfill: Optional[Callable[[], None]] = None
         self._control_heating_loop_scheduled_at: Optional[float] = None
         self._control_heating_loop_unsub: Optional[Callable[[], None]] = None
+        self._outside_temperature_unavailable: bool = False
 
         # Controllers
         self.areas = Areas.from_config(self._config)
@@ -837,8 +838,26 @@ class SatDemandControl:
             )
             return
 
-        if self.current_outside_temperature is None:
+        outside_temperature = self.current_outside_temperature
+        if outside_temperature is None:
+            if not self._outside_temperature_unavailable:
+                _LOGGER.warning("Outside temperature is unavailable for %s; requesting heating off until it recovers.", self._id)
+                self._outside_temperature_unavailable = True
+
+            await self._heating_control.update(
+                HeatingDemand(
+                    hvac_mode=self.hvac_mode,
+                    valves_open=self.valves_open,
+                    timestamp=event_timestamp(time),
+                    requested_setpoint=MINIMUM_SETPOINT,
+                    outside_temperature=None,
+                )
+            )
             return
+
+        if self._outside_temperature_unavailable:
+            _LOGGER.info("Outside temperature recovered for %s; resuming normal heating control.", self._id)
+            self._outside_temperature_unavailable = False
 
         await self._heating_control.update(
             HeatingDemand(
@@ -846,7 +865,7 @@ class SatDemandControl:
                 valves_open=self.valves_open,
                 timestamp=event_timestamp(time),
                 requested_setpoint=self.requested_setpoint,
-                outside_temperature=self.current_outside_temperature,
+                outside_temperature=outside_temperature,
                 target_temperature_changed_at=self._target_temperature_changed_at,
             )
         )
